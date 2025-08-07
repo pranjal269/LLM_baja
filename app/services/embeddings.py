@@ -1,6 +1,6 @@
-import numpy as np
-import google.generativeai as genai
 import pinecone
+# import numpy as np
+import google.generativeai as genai
 from typing import List, Dict, Any
 from app.models import DocumentChunk
 from app.config import settings
@@ -22,36 +22,28 @@ class EmbeddingService:
     def _init_pinecone(self):
         """Initialize Pinecone client and index"""
         try:
-            # Check if API key is configured properly
             if not settings.PINECONE_API_KEY or settings.PINECONE_API_KEY == "your-pinecone-api-key-here":
                 logger.warning("⚠️  Pinecone API key not configured. Some features may not work.")
-                self.pc = None
                 self.index = None
                 return
             
-            # Initialize Pinecone client
-            self.pc = Pinecone(api_key=settings.PINECONE_API_KEY)
+            pinecone.init(api_key=settings.PINECONE_API_KEY, environment=settings.PINECONE_ENVIRONMENT)
             
-            # Check if index exists, create if not
-            existing_indexes = [index['name'] for index in self.pc.list_indexes().indexes]
+            existing_indexes = pinecone.list_indexes()
             if settings.PINECONE_INDEX_NAME not in existing_indexes:
-                self.pc.create_index(
+                pinecone.create_index(
                     name=settings.PINECONE_INDEX_NAME,
                     dimension=settings.EMBEDDING_DIMENSION,
-                    metric='cosine',
-                    spec=PodSpec(
-                        environment='gcp-starter'
-                    )
+                    metric='cosine'
                 )
                 logger.info(f"Created Pinecone index: {settings.PINECONE_INDEX_NAME}")
             
-            self.index = self.pc.Index(settings.PINECONE_INDEX_NAME)
+            self.index = pinecone.Index(settings.PINECONE_INDEX_NAME)
             logger.info(f"Connected to Pinecone index: {settings.PINECONE_INDEX_NAME}")
             
         except Exception as e:
             logger.error(f"Failed to initialize Pinecone: {str(e)}")
             logger.warning("⚠️  Pinecone initialization failed. Vector storage features disabled.")
-            self.pc = None
             self.index = None
     
     def generate_embedding(self, text: str) -> List[float]:

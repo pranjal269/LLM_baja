@@ -265,7 +265,8 @@ class GeneralDocumentAnalyzer:
             topics_text = ", ".join(main_topics[:5])
             response_parts.append(f"It covers topics such as: {topics_text}.")
         
-        return " ".join(response_parts)
+        result = " ".join(response_parts)
+        return self._clean_response_text(result)
     
     def _answer_main_topics(self, analysis: Dict[str, Any]) -> str:
         """Answer questions about main topics"""
@@ -288,7 +289,8 @@ class GeneralDocumentAnalyzer:
                 if i <= 8:
                     response_parts.append(f"{i}. {section_name.title()}")
         
-        return "\n".join(response_parts)
+        result = "\n".join(response_parts)
+        return self._clean_response_text(result)
     
     def _answer_rules_question(self, question: str, document_text: str, analysis: Dict[str, Any]) -> str:
         """Answer questions about rules, regulations, requirements"""
@@ -319,9 +321,11 @@ class GeneralDocumentAnalyzer:
                 relevant_rules.append(rule.strip())
         
         if relevant_rules:
-            return f"Based on the document, here are the relevant rules:\n\n" + "\n\n".join(relevant_rules[:3])
+            result = f"Based on the document, here are the relevant rules:\n\n" + "\n\n".join(relevant_rules[:3])
+            return self._clean_response_text(result)
         elif rules:
-            return f"Here are some key rules from the document:\n\n" + "\n\n".join(rules[:3])
+            result = f"Here are some key rules from the document:\n\n" + "\n\n".join(rules[:3])
+            return self._clean_response_text(result)
         else:
             return "No specific rules or regulations were found in the document related to your query."
     
@@ -353,7 +357,47 @@ class GeneralDocumentAnalyzer:
         top_sentences = [sentence for score, sentence in relevant_sentences[:3]]
         
         if top_sentences:
-            return " ".join(top_sentences)
+            result = " ".join(top_sentences)
+            return self._clean_response_text(result)
         else:
             # Fallback: provide document summary
-            return analysis.get("document_summary", "No specific information found in the document related to your question.")
+            result = analysis.get("document_summary", "No specific information found in the document related to your question.")
+            return self._clean_response_text(result)
+    
+    def _clean_response_text(self, text: str) -> str:
+        """Clean up response text to remove unnecessary quotes and formatting issues"""
+        try:
+            import re
+            
+            # Remove excessive quotation marks around terms - be more aggressive
+            # Replace quoted terms like "Accident" with just Accident (but preserve necessary quotes)
+            text = re.sub(r'"([A-Za-z][A-Za-z\s]*?)"', r'\1', text)
+            
+            # Remove quotes around single words if they're clearly not needed
+            text = re.sub(r'"([A-Za-z]{2,})"', r'\1', text)
+            
+            # Remove quotes around common terms and phrases
+            text = re.sub(r'"([A-Z][a-z]+ [A-Z][a-z]+)"', r'\1', text)  # "Global Health"
+            text = re.sub(r'"([A-Z]{2,}[A-Z\s]*)"', r'\1', text)  # "AYUSH"
+            
+            # Clean up extra spaces
+            text = re.sub(r'\s+', ' ', text)
+            
+            # Remove quotes from the beginning and end if they wrap the whole text
+            text = text.strip()
+            if text.startswith('"') and text.endswith('"') and text.count('"') == 2:
+                text = text[1:-1].strip()
+            
+            # Remove document artifacts and page markers
+            text = re.sub(r'--- Page \d+ ---', '', text)
+            text = re.sub(r'Page \d+ of \d+', '', text)
+            text = re.sub(r'UIN[-:]?\s*[A-Z0-9]+', '', text)  # Remove policy numbers
+            
+            # Clean up multiple spaces again after artifact removal
+            text = re.sub(r'\s+', ' ', text)
+            
+            return text.strip()
+            
+        except Exception as e:
+            # If cleaning fails, return original text
+            return text

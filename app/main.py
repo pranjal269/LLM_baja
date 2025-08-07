@@ -3,6 +3,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from typing import List, Optional
 import time
 import logging
+import re
 from datetime import datetime
 
 from app.config import settings
@@ -23,6 +24,48 @@ from app.services.auth import get_current_user, create_demo_token
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+def clean_json_response(text: str) -> str:
+    """Final cleanup of response text to remove JSON formatting issues"""
+    try:
+        # Remove excessive quotation marks around terms - be very aggressive
+        text = re.sub(r'"([A-Za-z][A-Za-z\s]*?)"', r'\1', text)
+        text = re.sub(r'"([A-Za-z]{2,})"', r'\1', text)
+        text = re.sub(r'"([A-Z][a-z]+ [A-Z][a-z]+)"', r'\1', text)  # "Global Health"
+        text = re.sub(r'"([A-Z]{2,}[A-Z\s]*)"', r'\1', text)  # "AYUSH"
+        
+        # Remove quotes from section names and technical terms
+        text = re.sub(r'"(Section [A-Z])"', r'\1', text)
+        text = re.sub(r'"(Preamble|Definitions|Annexures)"', r'\1', text)
+        
+        # Remove markdown formatting that causes JSON escaping issues
+        text = re.sub(r'\*\*(.*?)\*\*', r'\1', text)  # Remove **bold** formatting
+        text = re.sub(r'\*(.*?)\*', r'\1', text)      # Remove *italic* formatting
+        
+        # Final aggressive quote removal for remaining cases
+        text = re.sub(r'\\"([A-Za-z][A-Za-z\s]*?)\\"', r'\1', text)  # Remove \"quoted\" terms
+        text = re.sub(r'\\\"([A-Za-z][A-Za-z\s]*?)\\\"', r'\1', text)  # Remove escaped quotes
+        
+        # Clean up extra spaces
+        text = re.sub(r'\s+', ' ', text)
+        
+        # Remove quotes from beginning and end if they wrap the whole text
+        text = text.strip()
+        if text.startswith('"') and text.endswith('"') and text.count('"') == 2:
+            text = text[1:-1].strip()
+        
+        # Remove document artifacts and page markers
+        text = re.sub(r'--- Page \d+ ---', '', text)
+        text = re.sub(r'Page \d+ of \d+', '', text)
+        text = re.sub(r'UIN[-:]?\s*[A-Z0-9]+', '', text)
+        
+        # Clean up multiple spaces again
+        text = re.sub(r'\s+', ' ', text)
+        
+        return text.strip()
+    except Exception as e:
+        logger.error(f"Error cleaning response: {e}")
+        return text
 
 # Initialize FastAPI app
 app = FastAPI(
@@ -227,11 +270,17 @@ async def hackrx_run(
             logger.info("Using full text processing (vector search not available)")
             answers = question_answerer.answer_questions_with_text(request.questions, cleaned_text)
         
+        # Clean all answers to remove JSON formatting issues
+        cleaned_answers = []
+        for answer in answers:
+            cleaned_answer = clean_json_response(answer)
+            cleaned_answers.append(cleaned_answer)
+        
         # Calculate processing time
         processing_time = int((time.time() - start_time) * 1000)
         logger.info(f"Processed {len(request.questions)} questions in {processing_time}ms")
         
-        return HackrxResponse(answers=answers)
+        return HackrxResponse(answers=cleaned_answers)
         
     except HTTPException:
         raise
@@ -242,7 +291,9 @@ async def hackrx_run(
             "Unable to process the question due to technical difficulties." 
             for _ in request.questions
         ]
-        return HackrxResponse(answers=fallback_answers)
+        # Clean fallback answers too
+        cleaned_fallback = [clean_json_response(answer) for answer in fallback_answers]
+        return HackrxResponse(answers=cleaned_fallback)
 
 @app.post("/query", response_model=DecisionResponse)
 async def process_query_legacy(

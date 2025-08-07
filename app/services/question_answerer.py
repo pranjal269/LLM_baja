@@ -20,7 +20,7 @@ class QuestionAnswerer:
                 genai.configure(api_key=settings.GEMINI_API_KEY)
                 
                 # Try different model variants
-                model_variants = ["gemini-1.5-flash", "gemini-1.5-pro", "gemini-pro"]
+                model_variants = ["gemini-2.5-pro", "gemini-1.5-pro", "gemini-1.5-flash"]
                 
                 for model_name in model_variants:
                     try:
@@ -144,6 +144,8 @@ INSTRUCTIONS:
 - If exact information isn't explicitly stated, provide the closest relevant information.
 - NEVER say the information is unavailable or not in the document.
 - Be concise but informative.
+- Do NOT use quotation marks around terms, definitions, or company names.
+- Write in plain text without special formatting or quotes.
 
 ANSWER:"""
 
@@ -159,6 +161,9 @@ ANSWER:"""
             # Clean up the answer
             if answer.lower().startswith("answer:"):
                 answer = answer[7:].strip()
+            
+            # Clean up formatting issues
+            answer = self._clean_response_formatting(answer)
             
             # Check for empty or error responses
             if not answer or "not available in" in answer.lower() or "unable to" in answer.lower():
@@ -314,6 +319,8 @@ INSTRUCTIONS:
 - If exact information isn't explicitly stated, provide the closest relevant information.
 - NEVER say the information is unavailable or not in the document.
 - Be concise but informative.
+- Do NOT use quotation marks around terms, definitions, or company names.
+- Write in plain text without special formatting or quotes.
 
 ANSWER:"""
 
@@ -329,6 +336,9 @@ ANSWER:"""
             # Clean up the answer
             if answer.lower().startswith("answer:"):
                 answer = answer[7:].strip()
+            
+            # Clean up formatting issues
+            answer = self._clean_response_formatting(answer)
             
             # Check for empty or error responses
             if not answer or "not available in" in answer.lower() or "unable to" in answer.lower():
@@ -346,3 +356,43 @@ ANSWER:"""
             except Exception as final_error:
                 logger.error(f"Final fallback in _answer_with_full_text failed: {final_error}")
                 return "Unable to process the question due to technical difficulties."
+    
+    def _clean_response_formatting(self, answer: str) -> str:
+        """Clean up response formatting to remove unnecessary quotes and improve readability"""
+        try:
+            # Remove excessive quotation marks around terms - be more aggressive
+            # Replace quoted terms like "Accident" with just Accident
+            answer = re.sub(r'"([A-Za-z][A-Za-z\s]*?)"', r'\1', answer)
+            
+            # Remove quotes around single words if they're not needed for clarity
+            answer = re.sub(r'"([A-Za-z]{2,})"', r'\1', answer)
+            
+            # Remove quotes around common terms
+            answer = re.sub(r'"([A-Z][a-z]+ [A-Z][a-z]+)"', r'\1', answer)  # "Global Health"
+            answer = re.sub(r'"([A-Z]{2,}[A-Z\s]*)"', r'\1', answer)  # "AYUSH"
+            
+            # Clean up extra spaces
+            answer = re.sub(r'\s+', ' ', answer)
+            
+            # Remove quotes from the beginning and end if they wrap the whole answer
+            answer = answer.strip()
+            if answer.startswith('"') and answer.endswith('"'):
+                answer = answer[1:-1].strip()
+            
+            # Clean up specific formatting issues
+            answer = answer.replace('\\n', ' ')
+            answer = answer.replace('\\"', '"')
+            
+            # Remove page markers and document artifacts
+            answer = re.sub(r'--- Page \d+ ---', '', answer)
+            answer = re.sub(r'Page \d+ of \d+', '', answer)
+            answer = re.sub(r'UIN[-:]?\s*[A-Z0-9]+', '', answer)  # Remove policy numbers
+            
+            # Clean up multiple spaces
+            answer = re.sub(r'\s+', ' ', answer)
+            
+            return answer.strip()
+            
+        except Exception as e:
+            logger.error(f"Error cleaning response formatting: {str(e)}")
+            return answer

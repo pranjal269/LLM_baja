@@ -25,7 +25,7 @@ class Settings(BaseSettings):
     CHUNK_OVERLAP: int = int(os.getenv("CHUNK_OVERLAP", "200"))
     
     # LLM Settings
-    GEMINI_MODEL: str = os.getenv("GEMINI_MODEL", "gemini-pro")
+    GEMINI_MODEL: str = os.getenv("GEMINI_MODEL", "gemini-2.5-pro")
     MAX_TOKENS: int = int(os.getenv("MAX_TOKENS", "2048"))
     TEMPERATURE: float = float(os.getenv("TEMPERATURE", "0.1"))
     

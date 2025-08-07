@@ -1,6 +1,6 @@
 import numpy as np
 import google.generativeai as genai
-from pinecone import Pinecone, PodSpec
+import pinecone
 from typing import List, Dict, Any
 from app.models import DocumentChunk
 from app.config import settings

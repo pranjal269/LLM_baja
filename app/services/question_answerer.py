@@ -2,6 +2,7 @@ import google.generativeai as genai
 from typing import List, Dict, Any
 from app.models import SearchResult, DocumentChunk
 from app.config import settings
+from app.services.rule_based_answerer import RuleBasedAnswerer
 import logging
 import re
 
@@ -11,30 +12,26 @@ class QuestionAnswerer:
     """Service to answer multiple questions based on document content"""
     
     def __init__(self):
+        # Initialize rule-based answerer as fallback
+        self.rule_based_answerer = RuleBasedAnswerer()
+        
         try:
             if settings.GEMINI_API_KEY and settings.GEMINI_API_KEY != "your-gemini-api-key-here":
                 genai.configure(api_key=settings.GEMINI_API_KEY)
                 
-                # Directly use models/gemini-pro - this is the actual model name expected by the API
+                # Try different model variants
                 try:
-                    self.model = genai.GenerativeModel("models/gemini-pro")
+                    self.model = genai.GenerativeModel("gemini-pro")
                     self.gemini_available = True
-                    logger.info("✅ Successfully initialized Gemini with models/gemini-pro")
+                    logger.info("✅ Successfully initialized Gemini with gemini-pro")
                 except Exception as e:
-                    logger.error(f"Failed with models/gemini-pro: {str(e)}")
-                    # Try without models/ prefix as fallback
-                    try:
-                        self.model = genai.GenerativeModel("gemini-pro")
-                        self.gemini_available = True
-                        logger.info("✅ Successfully initialized Gemini with gemini-pro")
-                    except Exception as e2:
-                        logger.error(f"Failed with gemini-pro: {str(e2)}")
-                        self.model = None
-                        self.gemini_available = False
+                    logger.error(f"Failed with gemini-pro: {str(e)}")
+                    self.model = None
+                    self.gemini_available = False
             else:
                 self.model = None
                 self.gemini_available = False
-                logger.warning("⚠️ Gemini API key not configured. Using fallback responses.")
+                logger.warning("⚠️ Gemini API key not configured. Using rule-based responses.")
         except Exception as e:
             logger.error(f"Error initializing Gemini: {str(e)}")
             self.model = None
@@ -46,8 +43,12 @@ class QuestionAnswerer:
             logger.info(f"📝 Answering {len(questions)} questions with {len(search_results)} search results")
             
             if not self.gemini_available:
-                logger.warning("⚠️  Gemini not available, using fallback")
-                return self._generate_fallback_answers(questions)
+                logger.warning("⚠️  Gemini not available, using rule-based answers")
+                # Extract text from search results for rule-based processing
+                combined_text = ""
+                for result in search_results:
+                    combined_text += result.chunk.chunk_text + "\n"
+                return self.rule_based_answerer.answer_questions_from_document(questions, combined_text)
             
             # Prepare context from search results
             context = self._prepare_context(search_results)
@@ -65,7 +66,11 @@ class QuestionAnswerer:
             
         except Exception as e:
             logger.error(f"Error answering questions: {str(e)}")
-            return self._generate_fallback_answers(questions)
+            # Extract text from search results for rule-based processing
+            combined_text = ""
+            for result in search_results:
+                combined_text += result.chunk.chunk_text + "\n"
+            return self.rule_based_answerer.answer_questions_from_document(questions, combined_text)
 
     def _prepare_context(self, search_results: List[SearchResult]) -> str:
         """Prepare context string from search results"""
@@ -185,8 +190,10 @@ ANSWER:"""
             return "No relevant information found in the document."
 
     def _generate_fallback_answers(self, questions: List[str]) -> List[str]:
-        """Generate generic answers when the LLM is not available"""
-        return [self._extract_relevant_content(question, "") for question in questions]
+        """Generate answers using rule-based system when LLM is not available"""
+        logger.info("Using rule-based fallback answers")
+        # Return default answers if no document text is available
+        return [self.rule_based_answerer._extract_answer(question.lower(), "") for question in questions]
     
     def answer_questions_with_text(self, questions: List[str], document_text: str) -> List[str]:
         """Answer questions directly from document text"""
@@ -194,25 +201,45 @@ ANSWER:"""
             logger.info(f"📝 Answering {len(questions)} questions with full text ({len(document_text)} chars)")
             
             if not self.gemini_available:
-                return self._generate_fallback_answers(questions)
+                logger.info("Using rule-based answerer (Gemini not available)")
+                return self.rule_based_answerer.answer_questions_from_document(questions, document_text)
             
             answers = []
             for i, question in enumerate(questions):
-                logger.info(f"❓ Processing question {i+1}/{len(questions)} with full text")
-                answer = self._answer_with_full_text(question, document_text)
-                answers.append(answer)
+                try:
+                    logger.info(f"❓ Processing question {i+1}/{len(questions)} with full text")
+                    answer = self._answer_with_full_text(question, document_text)
+                    
+                    # Check if answer indicates API failure (quota exceeded, etc.)
+                    if "No relevant information found" in answer or len(answer) < 10:
+                        logger.warning(f"Gemini failed for question, using rule-based fallback")
+                        answer = self.rule_based_answerer._extract_answer(question.lower(), document_text.lower())
+                    
+                    answers.append(answer)
+                except Exception as e:
+                    # If individual question fails (quota, etc.), use rule-based
+                    if "429" in str(e) or "quota" in str(e).lower():
+                        logger.warning(f"Gemini quota exceeded, using rule-based fallback")
+                        answer = self.rule_based_answerer._extract_answer(question.lower(), document_text.lower())
+                        answers.append(answer)
+                    else:
+                        logger.error(f"Error processing question: {e}")
+                        answer = self.rule_based_answerer._extract_answer(question.lower(), document_text.lower())
+                        answers.append(answer)
             
             return answers
             
         except Exception as e:
             logger.error(f"Error answering questions with text: {str(e)}")
-            return self._generate_fallback_answers(questions)
+            # Final fallback: use rule-based system
+            logger.info("Using rule-based answerer as final fallback")
+            return self.rule_based_answerer.answer_questions_from_document(questions, document_text)
     
     def _answer_with_full_text(self, question: str, document_text: str) -> str:
         """Answer a question using the full document text"""
         try:
             if not self.gemini_available:
-                return self._extract_relevant_content(question, document_text)
+                return self.rule_based_answerer._extract_answer(question.lower(), document_text.lower())
             
             # Truncate document if too long
             max_context_length = 6000
@@ -246,7 +273,7 @@ ANSWER:"""
                 answer = response.text.strip() if response and response.text else ""
             except Exception as api_error:
                 logger.error(f"API error with full text: {str(api_error)}")
-                return self._extract_relevant_content(question, document_text)
+                return self.rule_based_answerer._extract_answer(question.lower(), document_text.lower())
             
             # Clean up the answer
             if answer.lower().startswith("answer:"):
@@ -254,11 +281,11 @@ ANSWER:"""
             
             # Check for empty or error responses
             if not answer or "not available in" in answer.lower() or "unable to" in answer.lower():
-                # Use the fallback method with the document text as context
-                return self._extract_relevant_content(question, document_text)
+                # Use rule-based answerer as fallback
+                return self.rule_based_answerer._extract_answer(question.lower(), document_text.lower())
             
             return answer
             
         except Exception as e:
             logger.error(f"Error generating answer with full text: {str(e)}")
-            return self._extract_relevant_content(question, document_text)
+            return self.rule_based_answerer._extract_answer(question.lower(), document_text.lower())

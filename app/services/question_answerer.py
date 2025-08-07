@@ -2,7 +2,7 @@ import google.generativeai as genai
 from typing import List, Dict, Any
 from app.models import SearchResult, DocumentChunk
 from app.config import settings
-from app.services.rule_based_answerer import RuleBasedAnswerer
+from app.services.general_analyzer import GeneralDocumentAnalyzer
 import logging
 import re
 
@@ -12,22 +12,35 @@ class QuestionAnswerer:
     """Service to answer multiple questions based on document content"""
     
     def __init__(self):
-        # Initialize rule-based answerer as fallback
-        self.rule_based_answerer = RuleBasedAnswerer()
+        # Initialize general document analyzer for intelligent fallback
+        self.general_analyzer = GeneralDocumentAnalyzer()
         
         try:
             if settings.GEMINI_API_KEY and settings.GEMINI_API_KEY != "your-gemini-api-key-here":
                 genai.configure(api_key=settings.GEMINI_API_KEY)
                 
                 # Try different model variants
-                try:
-                    self.model = genai.GenerativeModel("gemini-pro")
-                    self.gemini_available = True
-                    logger.info("✅ Successfully initialized Gemini with gemini-pro")
-                except Exception as e:
-                    logger.error(f"Failed with gemini-pro: {str(e)}")
+                model_variants = ["gemini-1.5-flash", "gemini-1.5-pro", "gemini-pro"]
+                
+                for model_name in model_variants:
+                    try:
+                        # Test the model with a simple prompt
+                        test_model = genai.GenerativeModel(model_name)
+                        test_response = test_model.generate_content("Hello")
+                        
+                        if test_response and test_response.text:
+                            self.model = test_model
+                            self.gemini_available = True
+                            logger.info(f"✅ Successfully initialized Gemini with {model_name}")
+                            break
+                    except Exception as e:
+                        logger.warning(f"Failed with {model_name}: {str(e)}")
+                        continue
+                else:
+                    # No model worked
                     self.model = None
                     self.gemini_available = False
+                    logger.warning("⚠️ All Gemini models failed, using intelligent fallback")
             else:
                 self.model = None
                 self.gemini_available = False
@@ -43,12 +56,19 @@ class QuestionAnswerer:
             logger.info(f"📝 Answering {len(questions)} questions with {len(search_results)} search results")
             
             if not self.gemini_available:
-                logger.warning("⚠️  Gemini not available, using rule-based answers")
-                # Extract text from search results for rule-based processing
+                logger.warning("⚠️  Gemini not available, using intelligent document analysis")
+                # Extract text from search results for intelligent processing
                 combined_text = ""
                 for result in search_results:
                     combined_text += result.chunk.chunk_text + "\n"
-                return self.rule_based_answerer.answer_questions_from_document(questions, combined_text)
+                
+                # Use general analyzer for intelligent answers
+                answers = []
+                document_analysis = self.general_analyzer.analyze_document(combined_text)
+                for question in questions:
+                    answer = self.general_analyzer.answer_question(question, combined_text, document_analysis)
+                    answers.append(answer)
+                return answers
             
             # Prepare context from search results
             context = self._prepare_context(search_results)
@@ -66,11 +86,22 @@ class QuestionAnswerer:
             
         except Exception as e:
             logger.error(f"Error answering questions: {str(e)}")
-            # Extract text from search results for rule-based processing
-            combined_text = ""
-            for result in search_results:
-                combined_text += result.chunk.chunk_text + "\n"
-            return self.rule_based_answerer.answer_questions_from_document(questions, combined_text)
+            # Extract text from search results for intelligent processing
+            try:
+                combined_text = ""
+                for result in search_results:
+                    combined_text += result.chunk.chunk_text + "\n"
+                
+                # Use general analyzer as fallback
+                answers = []
+                document_analysis = self.general_analyzer.analyze_document(combined_text)
+                for question in questions:
+                    answer = self.general_analyzer.answer_question(question, combined_text, document_analysis)
+                    answers.append(answer)
+                return answers
+            except Exception as fallback_error:
+                logger.error(f"Fallback analysis failed: {fallback_error}")
+                return ["Unable to process the question due to technical difficulties." for _ in questions]
 
     def _prepare_context(self, search_results: List[SearchResult]) -> str:
         """Prepare context string from search results"""
@@ -190,10 +221,10 @@ ANSWER:"""
             return "No relevant information found in the document."
 
     def _generate_fallback_answers(self, questions: List[str]) -> List[str]:
-        """Generate answers using rule-based system when LLM is not available"""
-        logger.info("Using rule-based fallback answers")
-        # Return default answers if no document text is available
-        return [self.rule_based_answerer._extract_answer(question.lower(), "") for question in questions]
+        """Generate answers using general analyzer when LLM is not available"""
+        logger.info("Using general analyzer fallback answers")
+        # Return generic answers when no document context is available
+        return ["Unable to answer this question without proper document context." for question in questions]
     
     def answer_questions_with_text(self, questions: List[str], document_text: str) -> List[str]:
         """Answer questions directly from document text"""
@@ -201,8 +232,14 @@ ANSWER:"""
             logger.info(f"📝 Answering {len(questions)} questions with full text ({len(document_text)} chars)")
             
             if not self.gemini_available:
-                logger.info("Using rule-based answerer (Gemini not available)")
-                return self.rule_based_answerer.answer_questions_from_document(questions, document_text)
+                logger.info("Using intelligent document analysis (Gemini not available)")
+                # Use general analyzer for intelligent processing
+                answers = []
+                document_analysis = self.general_analyzer.analyze_document(document_text)
+                for question in questions:
+                    answer = self.general_analyzer.answer_question(question, document_text, document_analysis)
+                    answers.append(answer)
+                return answers
             
             answers = []
             for i, question in enumerate(questions):
@@ -212,34 +249,47 @@ ANSWER:"""
                     
                     # Check if answer indicates API failure (quota exceeded, etc.)
                     if "No relevant information found" in answer or len(answer) < 10:
-                        logger.warning(f"Gemini failed for question, using rule-based fallback")
-                        answer = self.rule_based_answerer._extract_answer(question.lower(), document_text.lower())
+                        logger.warning(f"Gemini failed for question, using intelligent analysis fallback")
+                        document_analysis = self.general_analyzer.analyze_document(document_text)
+                        answer = self.general_analyzer.answer_question(question, document_text, document_analysis)
                     
                     answers.append(answer)
                 except Exception as e:
-                    # If individual question fails (quota, etc.), use rule-based
+                    # If individual question fails (quota, etc.), use intelligent analysis
                     if "429" in str(e) or "quota" in str(e).lower():
-                        logger.warning(f"Gemini quota exceeded, using rule-based fallback")
-                        answer = self.rule_based_answerer._extract_answer(question.lower(), document_text.lower())
+                        logger.warning(f"Gemini quota exceeded, using intelligent analysis fallback")
+                        document_analysis = self.general_analyzer.analyze_document(document_text)
+                        answer = self.general_analyzer.answer_question(question, document_text, document_analysis)
                         answers.append(answer)
                     else:
                         logger.error(f"Error processing question: {e}")
-                        answer = self.rule_based_answerer._extract_answer(question.lower(), document_text.lower())
+                        document_analysis = self.general_analyzer.analyze_document(document_text)
+                        answer = self.general_analyzer.answer_question(question, document_text, document_analysis)
                         answers.append(answer)
             
             return answers
             
         except Exception as e:
             logger.error(f"Error answering questions with text: {str(e)}")
-            # Final fallback: use rule-based system
-            logger.info("Using rule-based answerer as final fallback")
-            return self.rule_based_answerer.answer_questions_from_document(questions, document_text)
+            # Final fallback: use general analyzer
+            logger.info("Using general analyzer as final fallback")
+            try:
+                answers = []
+                document_analysis = self.general_analyzer.analyze_document(document_text)
+                for question in questions:
+                    answer = self.general_analyzer.answer_question(question, document_text, document_analysis)
+                    answers.append(answer)
+                return answers
+            except Exception as final_error:
+                logger.error(f"Final fallback failed: {final_error}")
+                return ["Unable to process the question due to technical difficulties." for _ in questions]
     
     def _answer_with_full_text(self, question: str, document_text: str) -> str:
         """Answer a question using the full document text"""
         try:
             if not self.gemini_available:
-                return self.rule_based_answerer._extract_answer(question.lower(), document_text.lower())
+                document_analysis = self.general_analyzer.analyze_document(document_text)
+                return self.general_analyzer.answer_question(question, document_text, document_analysis)
             
             # Truncate document if too long
             max_context_length = 6000
@@ -273,7 +323,8 @@ ANSWER:"""
                 answer = response.text.strip() if response and response.text else ""
             except Exception as api_error:
                 logger.error(f"API error with full text: {str(api_error)}")
-                return self.rule_based_answerer._extract_answer(question.lower(), document_text.lower())
+                document_analysis = self.general_analyzer.analyze_document(document_text)
+                return self.general_analyzer.answer_question(question, document_text, document_analysis)
             
             # Clean up the answer
             if answer.lower().startswith("answer:"):
@@ -281,11 +332,17 @@ ANSWER:"""
             
             # Check for empty or error responses
             if not answer or "not available in" in answer.lower() or "unable to" in answer.lower():
-                # Use rule-based answerer as fallback
-                return self.rule_based_answerer._extract_answer(question.lower(), document_text.lower())
+                # Use general analyzer as fallback
+                document_analysis = self.general_analyzer.analyze_document(document_text)
+                return self.general_analyzer.answer_question(question, document_text, document_analysis)
             
             return answer
             
         except Exception as e:
             logger.error(f"Error generating answer with full text: {str(e)}")
-            return self.rule_based_answerer._extract_answer(question.lower(), document_text.lower())
+            try:
+                document_analysis = self.general_analyzer.analyze_document(document_text)
+                return self.general_analyzer.answer_question(question, document_text, document_analysis)
+            except Exception as final_error:
+                logger.error(f"Final fallback in _answer_with_full_text failed: {final_error}")
+                return "Unable to process the question due to technical difficulties."

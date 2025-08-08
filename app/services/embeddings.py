@@ -1,5 +1,5 @@
-import pinecone
-# import numpy as np
+import os
+from pinecone import Pinecone, ServerlessSpec
 import google.generativeai as genai
 from typing import List, Dict, Any
 from app.models import DocumentChunk
@@ -11,41 +11,52 @@ logger = logging.getLogger(__name__)
 
 class EmbeddingService:
     """Handles document embeddings and Pinecone operations"""
-    
+
     def __init__(self):
-        # Initialize Gemini for embeddings (fallback solution)
+        # Configure Gemini API key for embeddings fallback
         genai.configure(api_key=settings.GEMINI_API_KEY)
-        
-        # Initialize Pinecone
+        # Initialize Pinecone client and index
         self._init_pinecone()
-    
+
     def _init_pinecone(self):
-        """Initialize Pinecone client and index"""
         try:
+            # Check if Pinecone API key is configured
             if not settings.PINECONE_API_KEY or settings.PINECONE_API_KEY == "your-pinecone-api-key-here":
                 logger.warning("⚠️  Pinecone API key not configured. Some features may not work.")
+                self.pc = None
                 self.index = None
                 return
-            
-            pinecone.init(api_key=settings.PINECONE_API_KEY, environment=settings.PINECONE_ENVIRONMENT)
-            
-            existing_indexes = pinecone.list_indexes()
+
+            # Initialize Pinecone client (serverless spec, no environment argument)
+            self.pc = Pinecone(api_key=settings.PINECONE_API_KEY)
+
+            # List existing indexes
+            existing_indexes = [idx.name for idx in self.pc.list_indexes()]
+
+            # Create index if it does not exist
             if settings.PINECONE_INDEX_NAME not in existing_indexes:
-                pinecone.create_index(
+                self.pc.create_index(
                     name=settings.PINECONE_INDEX_NAME,
                     dimension=settings.EMBEDDING_DIMENSION,
-                    metric='cosine'
+                    metric="cosine",
+                    spec=ServerlessSpec(
+                    cloud="aws",
+                    region="us-east-1"  
+        )
                 )
                 logger.info(f"Created Pinecone index: {settings.PINECONE_INDEX_NAME}")
-            
-            self.index = pinecone.Index(settings.PINECONE_INDEX_NAME)
+
+            # Connect to the index
+            self.index = self.pc.Index(settings.PINECONE_INDEX_NAME)
             logger.info(f"Connected to Pinecone index: {settings.PINECONE_INDEX_NAME}")
-            
+
         except Exception as e:
             logger.error(f"Failed to initialize Pinecone: {str(e)}")
             logger.warning("⚠️  Pinecone initialization failed. Vector storage features disabled.")
+            self.pc = None
             self.index = None
-    
+
+
     def generate_embedding(self, text: str) -> List[float]:
         """Generate embedding for a single text using a simple hash-based approach"""
         try:

@@ -1,6 +1,7 @@
 --only-binary=:all:
 fastapi==0.104.1
 uvicorn[standard]==0.24.0
+pinecone>=7.0.0
 python-multipart==0.0.6
 pydantic>=2.11,<3
 pydantic-settings==2.1.0

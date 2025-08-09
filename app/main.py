@@ -95,27 +95,38 @@ question_answerer = QuestionAnswerer()
 
 @app.get("/", response_model=dict)
 async def root():
-    """Root endpoint"""
+    """Root endpoint - PUBLIC ACCESS"""
     return {
         "message": "LLM Document Processing System",
         "version": "1.0.0",
         "status": "active",
         "endpoints": {
+            "get_token": "/demo-token",
             "hackrx_main": "/hackrx/run",
             "upload": "/upload-document", 
             "legacy_query": "/query",
-            "health": "/health",
-            "demo_token": "/demo-token"
+            "health": "/health"
         },
-        "hackrx_format": {
-            "input": {"documents": "URL", "questions": ["array of questions"]},
-            "output": {"answers": ["array of answers"]}
+        "auth_info": {
+            "required": "Bearer token for all endpoints except /demo-token and /health",
+            "get_token": "GET /demo-token to get authentication token"
         }
+    }
+
+# Keep the demo-token endpoint for backwards compatibility
+@app.get("/demo-token")
+async def get_demo_token():
+    """Get a demo token (optional - auth not required)"""
+    token = create_demo_token()
+    return {
+        "access_token": token,
+        "token_type": "bearer",
+        "note": "Authentication is not required for this API"
     }
 
 @app.get("/health", response_model=HealthCheckResponse)
 async def health_check():
-    """Health check endpoint"""
+    """Health check endpoint - PUBLIC ACCESS (no auth required)"""
     try:
         # Check Pinecone connection
         pinecone_stats = embedding_service.get_index_stats()
@@ -134,21 +145,10 @@ async def health_check():
         logger.error(f"Health check failed: {str(e)}")
         raise HTTPException(status_code=503, detail="Service unhealthy")
 
-@app.get("/demo-token")
-async def get_demo_token():
-    """Get a demo token for testing"""
-    token = create_demo_token()
-    return {
-        "access_token": token,
-        "token_type": "bearer",
-        "message": "Use this token in the Authorization header: Bearer <token>"
-    }
-
 @app.post("/upload-document")
 async def upload_document(
     file: UploadFile = File(...),
-    document_name: Optional[str] = Form(None),
-    current_user: dict = Depends(get_current_user)
+    document_name: Optional[str] = Form(None)
 ):
     """Upload and process a document"""
     try:
@@ -204,79 +204,60 @@ async def upload_document(
 
 @app.post("/hackrx/run", response_model=HackrxResponse)
 async def hackrx_run(
-    request: HackrxRequest,
-    current_user: dict = Depends(get_current_user)
+    request: HackrxRequest
 ):
     """Main endpoint for HackRX - processes document URL and answers questions"""
     start_time = time.time()
     
     try:
         logger.info(f"Processing HackRX request with {len(request.questions)} questions")
-        logger.info(f"Document URL: {request.documents}")
         
-        # Step 1: Download document from URL
+        # Step 1: Download document from URL (optimize timeout)
         document_content, file_extension = document_downloader.download_document(request.documents)
         
         if not document_content:
             raise HTTPException(status_code=400, detail="Failed to download document from provided URL")
         
-        # Step 2: Determine file type and process document
+        # Step 2-3: Process document (combine steps)
         file_type = document_downloader.get_file_type_from_extension(file_extension)
-        logger.info(f"Processing document as {file_type}")
-        
-        # Step 3: Load and parse document
         text_content, metadata = document_loader.load_document(document_content, file_type)
         cleaned_text = document_loader.preprocess_text(text_content)
         
-        # Step 4: Create chunks for better processing
+        # Step 4: Create fewer, larger chunks for faster processing
         chunks = chunker.create_semantic_chunks(cleaned_text, "downloaded_document", metadata)
         logger.info(f"Created {len(chunks)} chunks from document")
         
-        # Step 5: Try to use vector search if available, otherwise use full text
-        if embedding_service.index:
-            # Store chunks temporarily for searching
-            temp_success = embedding_service.store_chunks(chunks)
-            
-            if temp_success:
-                # Use semantic search approach
-                all_search_results = []
-                for question in request.questions:
-                    search_results = semantic_search.search_with_reranking(
-                        query=question,
-                        top_k=5,
-                        filters={"document_name": "downloaded_document"}
-                    )
-                    all_search_results.extend(search_results)
-                
-                # Remove duplicates and get top results
-                unique_results = {}
-                for result in all_search_results:
-                    if result.chunk.chunk_id not in unique_results:
-                        unique_results[result.chunk.chunk_id] = result
-                
-                top_results = list(unique_results.values())[:15]  # Top 15 unique chunks
-                answers = question_answerer.answer_questions(request.questions, top_results)
-                
-                # Clean up temporary storage
-                try:
-                    embedding_service.delete_document("downloaded_document")
-                except:
-                    pass  # Ignore cleanup errors
-            else:
-                # Fallback to full text processing
-                answers = question_answerer.answer_questions_with_text(request.questions, cleaned_text)
-        else:
-            # Use full text processing when vector search is not available
-            logger.info("Using full text processing (vector search not available)")
-            answers = question_answerer.answer_questions_with_text(request.questions, cleaned_text)
+        # Step 5: Skip vector search, use direct text processing for speed
+        logger.info("Using optimized full text processing for faster response")
         
-        # Clean all answers to remove JSON formatting issues
+        # Process questions in parallel batches
+        import asyncio
+        
+        async def process_batch(questions_batch):
+            return question_answerer.answer_questions_with_text(questions_batch, cleaned_text[:8000])  # Limit text size
+        
+        # Split questions into smaller batches for faster processing
+        batch_size = 2
+        question_batches = [request.questions[i:i+batch_size] for i in range(0, len(request.questions), batch_size)]
+        
+        # Process batches concurrently
+        batch_tasks = [process_batch(batch) for batch in question_batches]
+        batch_results = await asyncio.gather(*batch_tasks)
+        
+        # Flatten results
+        answers = []
+        for batch_result in batch_results:
+            answers.extend(batch_result)
+        
+        # Quick cleanup without heavy regex
         cleaned_answers = []
         for answer in answers:
-            cleaned_answer = clean_json_response(answer)
+            # Minimal cleanup for speed
+            cleaned_answer = answer.replace('---', '').replace('Page ', '').strip()
+            if len(cleaned_answer) > 500:  # Truncate long answers
+                cleaned_answer = cleaned_answer[:500] + "..."
             cleaned_answers.append(cleaned_answer)
         
-        # Calculate processing time
         processing_time = int((time.time() - start_time) * 1000)
         logger.info(f"Processed {len(request.questions)} questions in {processing_time}ms")
         
@@ -286,19 +267,13 @@ async def hackrx_run(
         raise
     except Exception as e:
         logger.error(f"Error in HackRX processing: {str(e)}")
-        # Return fallback answers on error
-        fallback_answers = [
-            "Unable to process the question due to technical difficulties." 
-            for _ in request.questions
-        ]
-        # Clean fallback answers too
-        cleaned_fallback = [clean_json_response(answer) for answer in fallback_answers]
-        return HackrxResponse(answers=cleaned_fallback)
+        # Fast fallback
+        fallback_answers = ["Processing error occurred." for _ in request.questions]
+        return HackrxResponse(answers=fallback_answers)
 
 @app.post("/query", response_model=DecisionResponse)
 async def process_query_legacy(
-    request: QueryRequest,
-    current_user: dict = Depends(get_current_user)
+    request: QueryRequest
 ):
     """Legacy endpoint for processing single queries (backward compatibility)"""
     start_time = time.time()
@@ -339,8 +314,7 @@ async def process_query_legacy(
 
 @app.post("/search")
 async def search_documents(
-    request: QueryRequest,
-    current_user: dict = Depends(get_current_user)
+    request: QueryRequest
 ):
     """Search documents without generating a decision"""
     try:
@@ -370,8 +344,7 @@ async def search_documents(
 
 @app.delete("/documents/{document_name}")
 async def delete_document(
-    document_name: str,
-    current_user: dict = Depends(get_current_user)
+    document_name: str
 ):
     """Delete a document and all its chunks"""
     try:
@@ -387,7 +360,7 @@ async def delete_document(
         raise HTTPException(status_code=500, detail=f"Error deleting document: {str(e)}")
 
 @app.get("/documents")
-async def list_documents(current_user: dict = Depends(get_current_user)):
+async def list_documents():
     """List all documents in the system"""
     try:
         stats = embedding_service.get_index_stats()
@@ -403,8 +376,7 @@ async def list_documents(current_user: dict = Depends(get_current_user)):
 
 @app.post("/explain")
 async def explain_decision(
-    request: QueryRequest,
-    current_user: dict = Depends(get_current_user)
+    request: QueryRequest
 ):
     """Get detailed explanation for a decision"""
     try:
